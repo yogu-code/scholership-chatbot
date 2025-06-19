@@ -277,18 +277,18 @@ def create_scholarship_prompt(user_input, user_details=None):
             'scholarship_type': stored_scholarship_type
         }
     
-    follow_up_questions = """
-📋 **Please share:**
-1. Category? (SC/ST/OBC/General/Minority)
-2. Income? (Below ₹1L/₹1-2.5L/₹2.5-8L/Above ₹8L)
-3. Girl student?
-4. Hostel stay?
-5. CGPA/percentage?
-6. Minority community? (Muslim/Christian/Sikh/etc.)
-7. Disabilities?
-8. Parents ex-servicemen/freedom fighters?
-💡 More details help me find the best scholarships!
-"""
+#     follow_up_questions = """
+# 📋 **Please share:**
+# 1. Category? (SC/ST/OBC/General/Minority)
+# 2. Income? (Below ₹1L/₹1-2.5L/₹2.5-8L/Above ₹8L)
+# 3. Girl student?
+# 4. Hostel stay?
+# 5. CGPA/percentage?
+# 6. Minority community? (Muslim/Christian/Sikh/etc.)
+# 7. Disabilities?
+# 8. Parents ex-servicemen/freedom fighters?
+# 💡 More details help me find the best scholarships!
+# """
     
     common_mistakes = """
 💡 **Avoid these mistakes:**
@@ -335,7 +335,7 @@ Example: "Thanks! Need scholarship help?"
 User said: "{user_input}". Redirect to scholarship types.
 Example: "I focus on Maharashtra scholarships (government, private, NGO, college). Which type are you looking for?"
 {common_mistakes}
-{follow_up_questions}
+
 """
     
     elif query_type == 'scholarship_query':
@@ -371,7 +371,8 @@ Scholarship type stored: **{stored_scholarship_type.capitalize()}**
 - College: Mumbai University Merit Scholarship, Pune University Endowment
 
 {common_mistakes}
-{follow_up_questions}
+
+
 """
         return f"""
 The user said: "{user_input}"  
@@ -388,7 +389,7 @@ The user said: "{user_input}"
 2. Ask: _"Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"_
 
 {common_mistakes}
-{follow_up_questions}
+
 """
     
     elif query_type == 'scholarship_personalized':
@@ -429,7 +430,7 @@ The user said: "{user_input}"
 - College: University-based
 
 {common_mistakes}
-{follow_up_questions}
+
 """
         return f"""
 The user said: "{user_input}"  
@@ -448,7 +449,7 @@ Here is what the chatbot knows based on this query:
 2. Ask: _"Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"_
 
 {common_mistakes}
-{follow_up_questions}
+
 """
     
     elif query_type == 'scholarship_types':
@@ -464,7 +465,7 @@ Your task is to:
 
 End with:
 {common_mistakes}
-{follow_up_questions}
+
 """
     
     elif query_type == 'scholarship_type_selection':
@@ -521,14 +522,12 @@ Example scholarships (customize based on type):
 - College: Mumbai University Merit Scholarship, Pune University Endowment Scholarship
 
 {common_mistakes}
-{follow_up_questions}
 """
     
     return f"""
 Unhandled intent: {query_type}. Redirect to scholarship help.
 Example: "I'm here for Maharashtra scholarships (government, private, NGO, college). Which type are you looking for?"
 {common_mistakes}
-{follow_up_questions}
 """
 
 def format_response(text):
