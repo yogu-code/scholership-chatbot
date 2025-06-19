@@ -47,7 +47,8 @@ class UserDetails(db.Model):
     is_minority = db.Column(db.Boolean, nullable=True)
     has_disability = db.Column(db.Boolean, nullable=True)
     ex_serviceman_parent = db.Column(db.Boolean, nullable=True)
-    scholarship_type = db.Column(db.String(50), nullable=True)
+    scholarship_type = db.Column(db.String(50), nullable=False, default='unspecified')
+    intent = db.Column(db.String(50), nullable=True)  # Store detected intent
     timestamp = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
@@ -61,268 +62,206 @@ def lemmatize_text(text):
     words = text.split()
     return ' '.join(lemmatizer.lemmatize(word) for word in words)
 
-def extract_user_details(user_input):
-    user_input_lower = user_input.lower().strip()
-    logger.debug(f"Extracting details from input: {user_input_lower}")
+def extract_user_details_with_gemini(user_input):
+    """
+    Use Gemini API to extract user details from the input.
+    Returns a dictionary with extracted fields.
+    """
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not configured")
+        return {}
     
-    details = {
-        'caste': None,
-        'income': None,
-        'gender': None,
-        'course_level': None,
-        'is_hostel': None,
-        'cgpa': None,
-        'is_minority': None,
-        'has_disability': None,
-        'ex_serviceman_parent': None,
-        'scholarship_type': None
+    prompt = f"""
+Analyze the following user query about scholarships and extract relevant details in JSON format.
+Return ONLY the JSON object with the extracted fields, nothing else.
+
+Fields to extract:
+- caste: SC, ST, OBC, General, Minority (or null if not mentioned)
+- income: Annual family income if mentioned (e.g., "1.5 lakh", "below 2.5L")
+- gender: male, female (or null if not mentioned)
+- course_level: ug (undergraduate), pg (postgraduate) (or null if not mentioned)
+- is_hostel: true if staying in hostel, false if not, null if not mentioned
+- cgpa: Numeric CGPA or percentage if mentioned
+- is_minority: true if from minority community, false or null otherwise
+- has_disability: true if has disability, false or null otherwise
+- ex_serviceman_parent: true if parent is ex-serviceman, false or null otherwise
+- scholarship_type: government, private, ngo, college (or null if not mentioned)
+
+Example output for "I'm an SC girl with 1.5L income looking for government scholarships":
+{{
+  "caste": "sc",
+  "income": "1.5 lakh",
+  "gender": "female",
+  "scholarship_type": "government"
+}}
+
+Now analyze this query:
+"{user_input}"
+"""
+
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "topK": 1,
+            "topP": 1.0,
+            "maxOutputTokens": 500,
+        }
     }
+    params = {'key': GEMINI_API_KEY}
 
-    caste_patterns = {
-        'sc': r'\b(sc|scheduled caste)\b',
-        'st': r'\b(st|scheduled tribe)\b',
-        'obc': r'\b(obc|other backward class)\b',
-        'general': r'\b(general|open)\b',
-        'minority': r'\b(minority|muslim|christian|sikh|jain|parsi|buddhist)\b'
-    }
-    for caste, pattern in caste_patterns.items():
-        if re.search(pattern, user_input_lower):
-            details['caste'] = caste
-            if caste == 'minority':
-                details['is_minority'] = True
-            break
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            params=params,
+            json=data,
+            timeout=10
+        )
 
-    income_pattern = r'\b(?:income|family income)\s*(?:is|of)?\s*(?:below|under|\d+\.?\d*\s*(?:lakh|lacs?|k|thousand)?|\d+\s*to\s*\d+\.?\d*\s*(?:lakh|lacs?))\b'
-    income_match = re.search(income_pattern, user_input_lower)
-    if income_match:
-        details['income'] = income_match.group(0)
-
-    if re.search(r'\b(girl|female|woman)\b', user_input_lower):
-        details['gender'] = 'female'
-    elif re.search(r'\b(boy|male|man)\b', user_input_lower):
-        details['gender'] = 'male'
-
-    course_patterns = {
-        'ug': r'\b(bsc|ba|be|btech|bcom|undergraduate|1st year|2nd year|3rd year|b\.?sc\.?\s*(?:cs|computer science)?)\b',
-        'pg': r'\b(msc|ma|mtech|mcom|postgraduate|master)\b'
-    }
-    for level, pattern in course_patterns.items():
-        if re.search(pattern, user_input_lower):
-            details['course_level'] = level
-            break
-
-    if re.search(r'\b(hostel|staying in hostel|hosteller)\b', user_input_lower):
-        details['is_hostel'] = True
-    elif re.search(r'\b(not in hostel|day scholar)\b', user_input_lower):
-        details['is_hostel'] = False
-
-    cgpa_pattern = r'\b(\d+\.?\d*)\s*(?:cgpa|percentage|percent|marks)\b'
-    cgpa_match = re.search(cgpa_pattern, user_input_lower)
-    if cgpa_match:
-        details['cgpa'] = float(cgpa_match.group(1))
-
-    if re.search(r'\b(disability|disabled|handicap)\b', user_input_lower):
-        details['has_disability'] = True
-
-    if re.search(r'\b(ex-serviceman|freedom fighter|parent is ex-serviceman)\b', user_input_lower):
-        details['ex_serviceman_parent'] = True
-
-    scholarship_types = {
-        'government': r'\b(government|govt|mahadbt|nsp|national scholarship|option\s*1|choose\s*1|select\s*1|1)\b',
-        'private': r'\b(private|buddy4study|vidyasaarathi|option\s*2|choose\s*2|select\s*2|2)\b',
-        'ngo': r'\b(ngo|non-profit|charity|option\s*3|choose\s*3|select\s*3|3)\b',
-        'college': r'\b(college|university|mumbai university|pune university|option\s*4|choose\s*4|select\s*4|4)\b'
-    }
-    for sch_type, pattern in scholarship_types.items():
-        match = re.search(pattern, user_input_lower)
-        if match:
-            details['scholarship_type'] = sch_type
-            logger.debug(f"Scholarship type extracted: {sch_type} from match: {match.group(0)}")
-            break
+        if response.status_code == 200:
+            content = response.json()
+            if 'candidates' in content and len(content['candidates']) > 0:
+                response_text = content['candidates'][0]['content']['parts'][0]['text'].strip()
+                try:
+                    # Extract JSON from the response
+                    json_start = response_text.find('{')
+                    json_end = response_text.rfind('}') + 1
+                    json_str = response_text[json_start:json_end]
+                    extracted_data = json.loads(json_str)
+                    logger.debug(f"Extracted details from Gemini: {extracted_data}")
+                    return extracted_data
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Gemini response as JSON: {response_text}")
+                    return {}
+            else:
+                logger.error("No response from Gemini API for entity extraction")
+                return {}
         else:
-            logger.debug(f"No match for scholarship type pattern: {pattern}")
-
-    logger.debug(f"Extracted details: {details}")
-    return details
+            error_message = f'Gemini API error: {response.status_code}'
+            try:
+                error_detail = response.json()
+                if 'error' in error_detail:
+                    error_message += f" - {error_detail['error'].get('message', 'Unknown error')}"
+            except:
+                error_message += f" - {response.text[:200]}"
+            logger.error(error_message)
+            return {}
+    except requests.exceptions.Timeout:
+        logger.error("Gemini API request timeout for entity extraction")
+        return {}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during entity extraction: {str(e)}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error during entity extraction: {str(e)}")
+        return {}
 
 def analyze_query_type(user_input):
+    """
+    Use Gemini API to classify the user input into one of the predefined intents.
+    """
     user_input_lower = user_input.lower().strip()
-    user_input_lemmatized = lemmatize_text(user_input_lower)
-    logger.debug(f"Analyzing query type for input: {user_input_lower}")
-    
-    intent_keywords = {
-        'greeting': {
-            'keywords': ['hi', 'hello', 'hey', 'namaste', 'good morning', 'good afternoon', 'good evening'],
-            'weight': 1.0
-        },
-        'bot_info': {
-            'keywords': [
-                'what can you do', 'what do you do', 'how can you help', 'tell me about yourself',
-                'who are you', 'what are you', 'your capabilities', 'help me', 'about this chatbot'
-            ],
-            'weight': 0.9
-        },
-        'bot_functionality': {
-            'keywords': [
-                'how does this work', 'how do you work', 'how to use this chatbot', 'how you find scholarships',
-                'how does it work', 'explain how you work', 'how to get scholarship through you'
-            ],
-            'weight': 0.9
-        },
-        'casual': {
-            'keywords': [
-                'how are you', 'what\'s up', 'how is your day', 'tell me a joke',
-                'thank you', 'thanks', 'okay', 'ok', 'yes', 'no', 'maybe',
-                'i am fine', 'good', 'nice', 'cool', 'awesome', 'great'
-            ],
-            'weight': 0.7
-        },
-        'scholarship_query': {
-            'keywords': [
-                'scholarship', 'financial aid', 'education loan', 'study help', 'fees', 'grant',
-                'mahadbt', 'nsp', 'government scheme', 'tuition fee', 'hostel allowance',
-                'eligibility', 'application', 'deadline', 'scholarship list', 'available scholarships'
-            ],
-            'weight': 0.95
-        },
-        'scholarship_personalized': {
-            'keywords': [
-                'i am', 'i\'m', 'my category', 'my income', 'student', 'bsc', 'msc', 'engineering', 'medical',
-                'college', 'university', 'sc', 'st', 'obc', 'general', 'low income', 'merit',
-                'find scholarship', 'scholarship for me', 'looking for scholarship', 'need scholarship'
-            ],
-            'weight': 1.1
-        },
-        'scholarship_types': {
-            'keywords': [
-                'scholarship types', 'types of scholarships', 'government scholarship', 'private scholarship',
-                'ngo scholarship', 'college scholarship', 'university scholarship', 'mahadbt', 'buddy4study',
-                'mumbai university', 'scholarship providers', 'kinds of scholarships', 'scholarship categories'
-            ],
-            'weight': 1.0
-        },
-        'scholarship_type_selection': {
-            'keywords': [
-                'government', 'govt', 'private', 'ngo', 'college', 'university', 'mahadbt', 'buddy4study',
-                'national scholarship', 'vidyasaarathi', 'mumbai university', 'pune university',
-                'option 1', 'choose 1', 'select 1', '1',
-                'option 2', 'choose 2', 'select 2', '2',
-                'option 3', 'choose 3', 'select 3', '3',
-                'option 4', 'choose 4', 'select 4', '4'
-            ],
-            'weight': 1.5
-        },
-        'general_conversation': {
-            'keywords': [],
-            'weight': 0.5
+    logger.debug(f"Analyzing query type for input: {user_input_lower} using Gemini API")
+
+    if not GEMINI_API_KEY:
+        logger.error("GEMINI_API_KEY not configured")
+        return 'general_conversation'  # Fallback intent
+
+    # Define the possible intents
+    possible_intents = [
+        'greeting',
+        'bot_info',
+        'bot_functionality',
+        'casual',
+        'scholarship_query',
+        'scholarship_personalized',
+        'scholarship_types',
+        'scholarship_type_selection',
+        'general_conversation'
+    ]
+
+    # Create prompt for Gemini API to classify intent
+    prompt = f"""
+Classify the following user input into one of these intents: {', '.join(possible_intents)}.
+Return only the intent name, nothing else.
+
+Input: "{user_input_lower}"
+
+Intent descriptions for reference:
+- greeting: User says hi, hello, or similar greetings.
+- bot_info: User asks about what the bot can do or its capabilities.
+- bot_functionality: User asks how the bot works or how to use it.
+- casual: User makes casual remarks like "thanks", "okay", or small talk.
+- scholarship_query: User asks general questions about scholarships or financial aid.
+- scholarship_personalized: User provides personal details (e.g., caste, income, course) to find specific scholarships.
+- scholarship_types: User asks about types or categories of scholarships.
+- scholarship_type_selection: User explicitly selects a scholarship type (e.g., government, private, ngo, college).
+- general_conversation: Any other input that doesn't fit the above categories.
+"""
+
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "topK": 1,
+            "topP": 1.0,
+            "maxOutputTokens": 50,
         }
     }
-    
-    lemmatized_keywords = {
-        intent: {
-            'keywords': [lemmatize_text(keyword) for keyword in data['keywords']],
-            'weight': data['weight']
-        }
-        for intent, data in intent_keywords.items()
-    }
-    
-    question_patterns = [
-        r'^(what|how|where|when|why|who|can you|tell me)\b',
-        r'.*\?$'
-    ]
-    
-    personalized_patterns = [
-        r'\bi(?:\'m| am)\b.*(student|category|income|scholarship)',
-        r'\bmy (category|income|course|degree)\b',
-        r'\b(sc|st|obc|general)\b.*scholarship'
-    ]
-    
-    scholarship_types_patterns = [
-        r'\b(type|kind|category|categories|source|provider).*(scholarship|grants)\b',
-        r'\b(government|private|ngo|college|university|mahadbt|buddy4study|mumbai university)\b.*scholarship',
-        r'\bwhat (type|kind|category|categories).*(scholarship|grants)\b',
-        r'\bscholarship.*(type|kind|category|categories|source|provider)\b'
-    ]
-    
-    scholarship_type_selection_patterns = [
-        r'\b(government|govt|private|ngo|college|university|mahadbt|buddy4study|nsp|vidyasaarathi|mumbai university|pune university)\b',
-        r'^(option|choose|select)\s*[1-4]$',
-        r'^\d$'
-    ]
-    
-    negation_keywords = ['not', 'no', 'don\'t', 'doesn\'t']
-    
-    intent_scores = {intent: 0.0 for intent in intent_keywords}
-    
-    for intent, data in lemmatized_keywords.items():
-        for phrase in data['keywords']:
-            if phrase in user_input_lemmatized:
-                intent_scores[intent] += data['weight']
-    
-    for intent, data in lemmatized_keywords.items():
-        for keyword in data['keywords']:
-            if len(keyword.split()) == 1 and keyword in user_input_lemmatized.split():
-                intent_scores[intent] += data['weight'] * 0.5
-    
-    is_question = any(re.search(pattern, user_input_lower) for pattern in question_patterns)
-    if is_question:
-        intent_scores['scholarship_query'] *= 1.2
-        intent_scores['bot_info'] *= 1.2
-        intent_scores['bot_functionality'] *= 1.2
-        intent_scores['scholarship_types'] *= 1.2
-    
-    is_personalized = any(re.search(pattern, user_input_lower) for pattern in personalized_patterns)
-    if is_personalized:
-        intent_scores['scholarship_personalized'] *= 1.5
-    
-    is_scholarship_types = any(re.search(pattern, user_input_lower) for pattern in scholarship_types_patterns)
-    if is_scholarship_types:
-        intent_scores['scholarship_types'] *= 1.5
-    
-    is_type_selection = any(re.search(pattern, user_input_lower) for pattern in scholarship_type_selection_patterns)
-    if is_type_selection:
-        intent_scores['scholarship_type_selection'] *= 2.5
-    
-    if any(neg in user_input_lemmatized for neg in negation_keywords):
-        intent_scores['scholarship_query'] *= 0.5
-        intent_scores['scholarship_personalized'] *= 0.5
-        intent_scores['scholarship_types'] *= 0.5
-        intent_scores['scholarship_type_selection'] *= 0.5
-    
-    if len(user_input.split()) <= 2:
-        intent_scores['casual'] += 1.0
-        intent_scores['general_conversation'] *= 0.8
-    
-    personal_keyword_count = sum(1 for keyword in lemmatized_keywords['scholarship_personalized']['keywords']
-                                if keyword in user_input_lemmatized)
-    if personal_keyword_count >= 3:
-        intent_scores['scholarship_personalized'] *= 1.3
-    
-    types_keyword_count = sum(1 for keyword in lemmatized_keywords['scholarship_types']['keywords']
-                             if keyword in user_input_lemmatized)
-    if types_keyword_count >= 2:
-        intent_scores['scholarship_types'] *= 1.3
-    
-    type_selection_count = sum(1 for keyword in lemmatized_keywords['scholarship_type_selection']['keywords']
-                              if keyword in user_input_lemmatized)
-    if type_selection_count >= 1:
-        intent_scores['scholarship_type_selection'] *= 1.8
-    
-    max_intent = max(intent_scores, key=intent_scores.get)
-    max_score = intent_scores[max_intent]
-    
-    if max_score < 0.5:
-        max_intent = 'general_conversation'
-    
-    logger.debug(f"Detected intent: {max_intent} with score: {max_score}")
-    return max_intent
+    params = {'key': GEMINI_API_KEY}
+
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            params=params,
+            json=data,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            content = response.json()
+            if 'candidates' in content and len(content['candidates']) > 0:
+                intent = content['candidates'][0]['content']['parts'][0]['text'].strip()
+                if intent in possible_intents:
+                    logger.debug(f"Gemini API detected intent: {intent}")
+                    return intent
+                else:
+                    logger.warning(f"Gemini API returned invalid intent: {intent}. Falling back to general_conversation")
+                    return 'general_conversation'
+            else:
+                logger.error("No response from Gemini API for intent detection")
+                return 'general_conversation'
+        else:
+            error_message = f'Gemini API error: {response.status_code}'
+            try:
+                error_detail = response.json()
+                if 'error' in error_detail:
+                    error_message += f" - {error_detail['error'].get('message', 'Unknown error')}"
+            except:
+                error_message += f" - {response.text[:200]}"
+            logger.error(error_message)
+            return 'general_conversation'
+
+    except requests.exceptions.Timeout:
+        logger.error("Gemini API request timeout for intent detection")
+        return 'general_conversation'
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error during intent detection: {str(e)}")
+        return 'general_conversation'
+    except Exception as e:
+        logger.error(f"Unexpected error during intent detection: {str(e)}")
+        return 'general_conversation'
 
 def create_scholarship_prompt(user_input, user_details=None):
     query_type = analyze_query_type(user_input)
     logger.debug(f"Creating prompt for query type: {query_type}")
     
-    recent_user = db.session.query(UserDetails).first()
-    stored_scholarship_type = recent_user.scholarship_type if recent_user else None
+    recent_user = db.session.query(UserDetails).order_by(UserDetails.timestamp.desc()).first()
+    stored_scholarship_type = recent_user.scholarship_type if recent_user and recent_user.scholarship_type != 'unspecified' else None
     stored_details = {}
     if recent_user:
         stored_details = {
@@ -334,7 +273,8 @@ def create_scholarship_prompt(user_input, user_details=None):
             'cgpa': recent_user.cgpa,
             'is_minority': recent_user.is_minority,
             'has_disability': recent_user.has_disability,
-            'ex_serviceman_parent': recent_user.ex_serviceman_parent
+            'ex_serviceman_parent': recent_user.ex_serviceman_parent,
+            'scholarship_type': stored_scholarship_type
         }
     
     follow_up_questions = """
@@ -400,15 +340,20 @@ Example: "I focus on Maharashtra scholarships (government, private, NGO, college
     
     elif query_type == 'scholarship_query':
         if stored_scholarship_type:
-            details_str = "\nUser profile from database:\n"
+            details_str = "\n🤖 What the chatbot knows about the user:\n"
             for key, value in stored_details.items():
-                if value is not None:
+                if value is not None and key != 'scholarship_type':
                     details_str += f"- {key.replace('_', ' ').title()}: {value}\n"
+            details_str += f"- Scholarship Type: {stored_scholarship_type.capitalize()}\n"
             return f"""
-The user said: "{user_input}" and has a stored scholarship type: {stored_scholarship_type.capitalize()}.
+The user said: "{user_input}"  
+Scholarship type stored: **{stored_scholarship_type.capitalize()}**  
+📌 Mention all details which you know about user:
 {details_str}
-Your task is to:
-1. List 2–3 relevant scholarships in Maharashtra for the {stored_scholarship_type} type in this compact format:
+
+🎯 Your task:
+
+1. List 4–5 relevant **scholarships in Maharashtra** for the `{stored_scholarship_type}` category in this compact format:
 
 🎓 **[Scholarship Name]**  
 **Level:** [UG / PG / Both]  
@@ -416,30 +361,32 @@ Your task is to:
 **Description:** [Short 1-line purpose of scholarship]  
 **Portal:** [Application or Info URL]
 
-2. Ensure scholarships match the user's profile (if details provided) and are specific to Maharashtra.
-3. End with: "Would you like more details on any of these scholarships or help with the application process?"
+2. Match scholarships to the user profile (caste, income, level, etc. if available).
+3. End with: _"Would you like more details on any of these scholarships or help with the application process?"_
 
-Example scholarships (customize based on type):
-- Government: Post Matric Scholarship for SC Students, Rajarshi Shahu Maharaj Scholarship
-- Private: TATA Capital Pankh Scholarship, Colgate Keep India Smiling Scholarship
-- NGO: ONGC Foundation Scholarship, KC Mahindra Scholarship
-- College: Mumbai University Merit Scholarship, Pune University Endowment Scholarship
+🔖 Example types:
+- Government: Post Matric Scholarship for SC, Rajarshi Shahu Maharaj Scholarship  
+- Private: TATA Capital Pankh, Colgate Keep India Smiling  
+- NGO: ONGC Foundation, KC Mahindra Scholarship  
+- College: Mumbai University Merit Scholarship, Pune University Endowment
 
 {common_mistakes}
 {follow_up_questions}
 """
-        else:
-            return f"""
-The user said: "{user_input}" and has no stored scholarship type.
-Your task is to:
-1. List the main types of scholarships available in Maharashtra with brief descriptions:
-   - Government: Funded by state or central government, e.g., via MahaDBT (https://mahadbtmahait.gov.in/)
-   - Private: Offered by private organizations, e.g., via Buddy4Study (https://buddy4study.com/)
-   - NGO: Provided by non-profits, often listed on Buddy4Study
-   - College/University: Institution-specific, e.g., Mumbai University (https://mu.ac.in/)
-2. Ask: "Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"
+        return f"""
+The user said: "{user_input}"  
+❗ No scholarship type is currently stored.
 
-End with:
+🎯 Your task:
+
+1. List the main types of scholarships in Maharashtra with 1-line descriptions:  
+- **Government:** State/central funded (e.g., [MahaDBT](https://mahadbtmahait.gov.in/))  
+- **Private:** Corporate-funded (e.g., [Buddy4Study](https://buddy4study.com/))  
+- **NGO:** Non-profit based  
+- **College/University:** Institution-specific (e.g., [Mumbai University](https://mu.ac.in/))
+
+2. Ask: _"Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"_
+
 {common_mistakes}
 {follow_up_questions}
 """
@@ -447,17 +394,24 @@ End with:
     elif query_type == 'scholarship_personalized':
         details_str = ""
         if user_details:
-            details_str = "\nUser profile from current query:\n"
+            details_str += "\n📌 User profile based on current input:\n"
             for key, value in user_details.items():
                 if value is not None:
                     details_str += f"- {key.replace('_', ' ').title()}: {value}\n"
+        
         if stored_scholarship_type:
-            details_str += f"\nStored scholarship type: {stored_scholarship_type.capitalize()}\n"
+            if not user_details or 'scholarship_type' not in user_details or user_details['scholarship_type'] is None:
+                user_details = user_details or {}
+                user_details['scholarship_type'] = stored_scholarship_type
+            details_str += f"\n📦 Scholarship type from memory: **{stored_scholarship_type.capitalize()}**\n"
             return f"""
-The user said: "{user_input}" and has a stored scholarship type: {stored_scholarship_type.capitalize()}.
+The user said: "{user_input}"  
+📌 Mention all details which you know about user:
 {details_str}
-Your task is to:
-1. List 2–3 relevant scholarships in Maharashtra for the {stored_scholarship_type} type in this compact format:
+
+🎯 Your task:
+
+1. Suggest 4–5 relevant **scholarships in Maharashtra** matching the user's `{stored_scholarship_type}` category and profile:
 
 🎓 **[Scholarship Name]**  
 **Level:** [UG / PG / Both]  
@@ -465,31 +419,34 @@ Your task is to:
 **Description:** [Short 1-line purpose of scholarship]  
 **Portal:** [Application or Info URL]
 
-2. Ensure scholarships match the user's profile (if details provided) and are specific to Maharashtra.
-3. End with: "Would you like more details on any of these scholarships or help with the application process?"
+2. Ensure matches based on caste, income, academic level, etc.
+3. End with: _"Would you like more details on any of these scholarships or help with the application process?"_
 
-Example scholarships (customize based on type):
-- Government: Post Matric Scholarship for SC Students, Rajarshi Shahu Maharaj Scholarship
-- Private: TATA Capital Pankh Scholarship, Colgate Keep India Smiling Scholarship
-- NGO: ONGC Foundation Scholarship, KC Mahindra Scholarship
-- College: Mumbai University Merit Scholarship, Pune University Endowment Scholarship
+🔖 Example sources:
+- Government: Post Matric for SC, Rajarshi Shahu  
+- Private: Tata Capital, Colgate  
+- NGO: ONGC, KC Mahindra  
+- College: University-based
 
 {common_mistakes}
 {follow_up_questions}
 """
-        else:
-            return f"""
-The user said: "{user_input}" and shared some personal details but no scholarship type is stored.
-{details_str}
-Your task is to:
-1. List the main types of scholarships available in Maharashtra with brief descriptions:
-   - Government: Funded by state or central government, e.g., via MahaDBT (https://mahadbtmahait.gov.in/)
-   - Private: Offered by private organizations, e.g., via Buddy4Study (https://buddy4study.com/)
-   - NGO: Provided by non-profits, often listed on Buddy4Study
-   - College/University: Institution-specific, e.g., Mumbai University (https://mu.ac.in/)
-2. Ask: "Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"
+        return f"""
+The user said: "{user_input}"  
+Here is what the chatbot knows based on this query:  
+{details_str}  
+❗ However, no scholarship type is stored yet.
 
-End with:
+🎯 Your task:
+
+1. List the main types of scholarships in Maharashtra with 1-line descriptions:  
+- **Government:** e.g., [MahaDBT](https://mahadbtmahait.gov.in/)  
+- **Private:** e.g., [Buddy4Study](https://buddy4study.com/)  
+- **NGO:** Often listed on private platforms  
+- **College:** e.g., [Mumbai University](https://mu.ac.in/)
+
+2. Ask: _"Which type of scholarship are you looking for? (e.g., Government, Private, NGO, College)"_
+
 {common_mistakes}
 {follow_up_questions}
 """
@@ -511,7 +468,7 @@ End with:
 """
     
     elif query_type == 'scholarship_type_selection':
-        scholarship_type = user_details.get('scholarship_type', 'unknown') if user_details else 'unknown'
+        scholarship_type = user_details.get('scholarship_type', 'unspecified') if user_details else 'unspecified'
         summary = "Based on our conversation, here's what I know about you: "
         known_details = []
         
@@ -526,7 +483,8 @@ End with:
             if recent_user.gender:
                 known_details.append(f"you are a {recent_user.gender} student")
         
-        known_details.append(f"you are looking for {scholarship_type} scholarships")
+        if scholarship_type != 'unspecified':
+            known_details.append(f"you are looking for {scholarship_type} scholarships")
         
         if known_details:
             summary += ", ".join(known_details) + "."
@@ -541,7 +499,7 @@ End with:
                     details_str += f"- {key.replace('_', ' ').title()}: {value}\n"
         
         return f"""
-The user said: "{user_input}" and selected the scholarship type: {scholarship_type.capitalize()}.
+The user said: "{user_input}" and selected the scholarship type: {scholarship_type.capitalize() if scholarship_type != 'unspecified' else 'Unspecified'}.
 {summary}
 {details_str}
 Your task is to:
@@ -610,22 +568,31 @@ def chat_with_gemini():
         user_input = result
         logger.debug(f"Processing chat query: {user_input}")
         
-        user_details = extract_user_details(user_input)
+        # Use Gemini for both intent detection and entity extraction
         query_type = analyze_query_type(user_input)
+        user_details = extract_user_details_with_gemini(user_input)
         
         with app.app_context():
-            existing_user = db.session.query(UserDetails).first()
+            # Validate extracted details
+            valid_details = {k: v for k, v in user_details.items() if v is not None}
+            valid_details['intent'] = query_type  # Store the detected intent
             
-            if query_type in ['scholarship_personalized', 'scholarship_type_selection', 'scholarship_query']:
+            logger.debug(f"Valid details to store: {valid_details}")
+            
+            if valid_details:
+                existing_user = db.session.query(UserDetails).order_by(UserDetails.timestamp.desc()).first()
+                
                 if existing_user:
+                    # Update only non-None fields, preserving scholarship_type unless explicitly changed
                     existing_user.query = user_input
+                    existing_user.intent = query_type
                     existing_user.timestamp = datetime.utcnow()
                     
-                    for key, value in user_details.items():
-                        if value is not None:
+                    for key, value in valid_details.items():
+                        if key != 'scholarship_type' or (key == 'scholarship_type' and value is not None):
                             setattr(existing_user, key, value)
                     
-                    logger.debug(f"Updated user details for single record")
+                    logger.debug(f"Updated user details for record ID {existing_user.id}: {valid_details}")
                 else:
                     new_user = UserDetails(
                         query=user_input,
@@ -638,18 +605,27 @@ def chat_with_gemini():
                         is_minority=user_details.get('is_minority'),
                         has_disability=user_details.get('has_disability'),
                         ex_serviceman_parent=user_details.get('ex_serviceman_parent'),
-                        scholarship_type=user_details.get('scholarship_type')
+                        scholarship_type=user_details.get('scholarship_type', 'unspecified'),
+                        intent=query_type
                     )
                     db.session.add(new_user)
-                    logger.debug(f"Created single user details record")
+                    logger.debug(f"Created new user details record: {valid_details}")
                 
                 try:
                     db.session.commit()
-                    logger.info(f"Stored/Updated user details for single record, Scholarship Type={user_details.get('scholarship_type')}")
+                    logger.info(f"Successfully stored/updated user details: {valid_details}")
                 except Exception as e:
                     db.session.rollback()
                     logger.error(f"Database storage error: {str(e)}")
                     return jsonify({'error': f'Failed to store user details: {str(e)}'}), 500
+            else:
+                logger.warning(f"No valid details extracted from input: {user_input}")
+            
+            # Log current database state for debugging
+            current_user = db.session.query(UserDetails).order_by(UserDetails.timestamp.desc()).first()
+            if current_user:
+                current_state = {c.name: getattr(current_user, c.name) for c in current_user.__table__.columns}
+                logger.debug(f"Current database state: {current_state}")
         
         if not GEMINI_API_KEY:
             logger.error("GEMINI_API_KEY not configured")
@@ -695,7 +671,8 @@ def chat_with_gemini():
                         'timestamp': str(datetime.now().isoformat()),
                         'includes_links': True,
                         'includes_common_mistakes': True,
-                        'scholarship_type_stored': user_details.get('scholarship_type', None)
+                        'scholarship_type_stored': user_details.get('scholarship_type', 'unspecified'),
+                        'intent_detected': query_type
                     }
                 })
             else:
@@ -722,152 +699,10 @@ def chat_with_gemini():
         logger.error(f"Server error: {str(e)}")
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        'status': 'healthy',
-        'message': 'Maharashtra Scholarship Assistant is running',
-        'gemini_configured': bool(GEMINI_API_KEY),
-        'database_configured': bool(app.config['SQLALCHEMY_DATABASE_URI']),
-        'version': '2.6',
-        'features': [
-            'Gemini AI powered responses',
-            'Maharashtra scholarship information',
-            'Direct scholarship website links',
-            'Comprehensive database with URLs',
-            'Common application mistakes guidance',
-            'Pro tips for successful applications',
-            'Helpline numbers included',
-            'Single record user details storage'
-        ],
-        'key_links': {
-            'mahadbt': 'https://mahadbtmahait.gov.in/',
-            'nsp': 'https://scholarships.gov.in/',
-            'buddy4study': 'https://buddy4study.com/'
-        }
-    })
-
-@app.route('/links', methods=['GET'])
-def get_scholarship_links():
-    return jsonify({
-        'government_portals': {
-            'Maharashtra DBT Portal': 'https://mahadbtmahait.gov.in/',
-            'National Scholarship Portal': 'https://scholarships.gov.in/',
-            'PM Scholarship Portal': 'https://ksb.gov.in/',
-            'UGC Scholarships': 'https://www.ugc.ac.in/page/Scholarships-and-Fellowships.aspx'
-        },
-        'search_platforms': {
-            'Buddy4Study': 'https://buddy4study.com/',
-            'Vidyasaarathi': 'https://www.vidyasaarathi.co.in/',
-            'Scholarships.com': 'https://www.scholarships.com/'
-        },
-        'technical_education': {
-            'Maharashtra DTE': 'https://dtemaharashtra.gov.in/',
-            'AICTE Scholarships': 'https://www.aicte-india.org/schemes/students-development-schemes'
-        },
-        'universities': {
-            'Pune University': 'http://www.unipune.ac.in/student_welfare/scholarships.htm',
-            'Mumbai University': 'https://mu.ac.in/student-services',
-            'Shivaji University': 'http://www.unishivaji.ac.in/scholarships'
-        },
-        'helplines': {
-            'Maharashtra DBT Helpline': '18002102131',
-            'NSP Helpline': '0120-6619540',
-            'Student Helpline': '8448440632'
-        }
-    })
-
-@app.route('/mistakes', methods=['GET'])
-def get_common_mistakes():
-    return jsonify({
-        'documentation_errors': {
-            'missing_documents': 'Not submitting all required documents',
-            'expired_certificates': 'Using outdated certificates (must be within 1 year)',
-            'wrong_format': 'Uploading documents in incorrect format',
-            'poor_quality_scans': 'Blurry or unclear document copies',
-            'missing_signatures': 'Forgetting required signatures'
-        },
-        'income_declaration_mistakes': {
-            'wrong_income_figures': 'Not matching income with official certificates',
-            'wrong_sources': 'Including/excluding income sources incorrectly',
-            'outdated_income_proof': 'Using old salary certificates',
-            'agricultural_income_errors': 'Incorrect agricultural/business income calculation'
-        },
-        'timing_issues': {
-            'last_minute_rush': 'Applying on deadline day',
-            'missing_renewal_dates': 'Forgetting annual scholarship renewal',
-            'academic_year_confusion': 'Applying for wrong academic year',
-            'document_expiry': 'Certificates expiring before deadline'
-        },
-        'academic_errors': {
-            'wrong_cgpa': 'Entering incorrect academic scores',
-            'course_code_mistakes': 'Wrong course/branch selection',
-            'institution_details': 'Incorrect college AISHE codes',
-            'semester_confusion': 'Wrong academic year/semester'
-        },
-        'category_mistakes': {
-            'wrong_category': 'Incorrect caste/reservation category',
-            'duplicate_applications': 'Multiple applications for same scholarship',
-            'ineligible_applications': 'Applying for non-qualifying scholarships',
-            'age_limit_ignorance': 'Not checking age eligibility'
-        },
-        'bank_account_issues': {
-            'inactive_accounts': 'Using dormant bank accounts',
-            'wrong_details': 'Incorrect account/IFSC details',
-            'non_dbt_accounts': 'Accounts not linked to DBT',
-            'joint_account_problems': 'Using parent\'s instead of student\'s account'
-        },
-        'technical_mistakes': {
-            'incomplete_applications': 'Not completing all form sections',
-            'wrong_contact_info': 'Inactive mobile/email addresses',
-            'password_problems': 'Forgetting login credentials',
-            'browser_issues': 'Incompatible browser or cache issues'
-        },
-        'pro_tips': {
-            'start_early': 'Begin applications 15-20 days before deadline',
-            'create_checklist': 'Verify all documents before submission',
-            'keep_records': 'Maintain copies of all documents',
-            'regular_followup': 'Check application status weekly',
-            'seek_help': 'Contact helplines for guidance'
-        },
-        'helplines': {
-            'Maharashtra DBT': '18002102131',
-            'NSP Helpline': '0120-6619540',
-            'Student Helpline': '8448440632'
-        }
-    })
-
-@app.route('/test', methods=['POST'])
-def test_chat():
-    try:
-        sample_query = "Government"
-        
-        test_request = {'query': sample_query}
-        
-        with app.test_request_context('/chat', method='POST', json=test_request):
-            return chat_with_gemini()
-            
-    except Exception as e:
-        logger.error(f"Test endpoint error: {str(e)}")
-        return jsonify({'error': f'Test error: {str(e)}'}), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    logger.error("404 Endpoint not found")
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-@app.errorhandler(405)
-def method_not_allowed(error):
-    logger.error("405 Method not allowed")
-    return jsonify({'error': 'Method not allowed'}), 405
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error("500 Internal server error")
-    return jsonify({'error': 'Internal server error'}), 500
+# ... [rest of your code remains the same] ...
 
 if __name__ == '__main__':
-    logger.info("Starting Enhanced Maharashtra Scholarship Assistant...")
+    logger.info("Starting Enhanced Maharashtra Scholarship Assistant with Gemini-powered entity extraction...")
     logger.info(f"GEMINI_API_KEY configured: {'Yes' if GEMINI_API_KEY else 'No'}")
     logger.info(f"Database configured: {'Yes' if app.config['SQLALCHEMY_DATABASE_URI'] else 'No'}")
     logger.info("\nAvailable endpoints:")
@@ -876,17 +711,16 @@ if __name__ == '__main__':
     logger.info("  GET  /links - Get all scholarship website links")
     logger.info("  GET  /mistakes - Get common scholarship application mistakes")
     logger.info("  POST /test - Test endpoint with sample query")
-    logger.info("\nUsage:")
-    logger.info("  curl -X POST http://localhost:5000/chat \\")
-    logger.info("       -H 'Content-Type: application/json' \\")
-    logger.info("       -d '{\"query\": \"Government\"}'")
     logger.info("\nKey Features:")
+    logger.info("  Gemini-powered intent detection and entity extraction")
     logger.info("  Direct scholarship website links included")
     logger.info("  Government portals (MahaDBT, NSP)")
     logger.info("  Private scholarship platforms")
     logger.info("  University-specific links")
     logger.info("  Helpline numbers included")
-    logger.info("  Single record user details storage")
+    logger.info("  Persistent scholarship type handling")
+    logger.info("  Null-safe scholarship type handling")
+    logger.info("  Intent-based data storage")
     
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not configured!")
@@ -897,7 +731,7 @@ if __name__ == '__main__':
         logger.warning("FLASK_SECRET_KEY not configured or using default!")
         logger.warning("Set a secure key: export FLASK_SECRET_KEY='your_secure_key_here'")
     
-    logger.info("\nReady to assist with Maharashtra scholarship queries with single record persistence!")
+    logger.info("\nReady to assist with Maharashtra scholarship queries with Gemini-powered entity extraction!")
     logger.info("="*60)
     
     app.run(debug=True, host='0.0.0.0', port=5000)
