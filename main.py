@@ -58,6 +58,20 @@ class UserDetails(db.Model):
 with app.app_context():
     db.create_all()
 
+# List of fallback questions
+FALLBACK_QUESTIONS = [
+    "Would you like to know about the application process for these scholarships?",
+    "Can you share your caste category (SC/ST/OBC/General/Minority) for more tailored results?",
+    "What is your annual family income range? (e.g., below ₹1L, ₹1-2.5L, ₹2.5-8L, above ₹8L)",
+    "Are you a girl student? This helps identify gender-specific scholarships.",
+    "Are you currently staying in a hostel?",
+    "What is your current CGPA or percentage?",
+    "Do you belong to any minority community? (Muslim/Christian/Sikh/etc.)",
+    "Do you have any disabilities?",
+    "Are your parents ex-servicemen or freedom fighters?",
+    "Would you like information about government, private, NGO, or college-specific scholarships?"
+]
+
 def lemmatize_text(text):
     words = text.split()
     return ' '.join(lemmatizer.lemmatize(word) for word in words)
@@ -256,6 +270,45 @@ Intent descriptions for reference:
         logger.error(f"Unexpected error during intent detection: {str(e)}")
         return 'general_conversation'
 
+def get_missing_details(user_details):
+    """Determine which important details are missing from user profile"""
+    important_fields = [
+        'caste', 'income', 'gender', 'course_level',
+        'is_hostel', 'cgpa', 'is_minority',
+        'has_disability', 'ex_serviceman_parent'
+    ]
+    
+    missing = []
+    for field in important_fields:
+        if not user_details.get(field):
+            missing.append(field)
+    return missing
+
+def create_fallback_question(missing_fields):
+    """Create appropriate follow-up question based on missing fields"""
+    if not missing_fields:
+        return FALLBACK_QUESTIONS[0]  # Default question about application process
+    
+    # Prioritize certain questions
+    if 'caste' in missing_fields:
+        return FALLBACK_QUESTIONS[1]
+    if 'income' in missing_fields:
+        return FALLBACK_QUESTIONS[2]
+    if 'gender' in missing_fields:
+        return FALLBACK_QUESTIONS[3]
+    if 'is_hostel' in missing_fields:
+        return FALLBACK_QUESTIONS[4]
+    if 'cgpa' in missing_fields:
+        return FALLBACK_QUESTIONS[5]
+    if 'is_minority' in missing_fields:
+        return FALLBACK_QUESTIONS[6]
+    if 'has_disability' in missing_fields:
+        return FALLBACK_QUESTIONS[7]
+    if 'ex_serviceman_parent' in missing_fields:
+        return FALLBACK_QUESTIONS[8]
+    
+    return FALLBACK_QUESTIONS[-1]  # Generic scholarship type question
+
 def create_scholarship_prompt(user_input, user_details=None):
     query_type = analyze_query_type(user_input)
     logger.debug(f"Creating prompt for query type: {query_type}")
@@ -277,18 +330,11 @@ def create_scholarship_prompt(user_input, user_details=None):
             'scholarship_type': stored_scholarship_type
         }
     
-#     follow_up_questions = """
-# 📋 **Please share:**
-# 1. Category? (SC/ST/OBC/General/Minority)
-# 2. Income? (Below ₹1L/₹1-2.5L/₹2.5-8L/Above ₹8L)
-# 3. Girl student?
-# 4. Hostel stay?
-# 5. CGPA/percentage?
-# 6. Minority community? (Muslim/Christian/Sikh/etc.)
-# 7. Disabilities?
-# 8. Parents ex-servicemen/freedom fighters?
-# 💡 More details help me find the best scholarships!
-# """
+    # Determine missing details for fallback question
+    current_details = user_details or {}
+    combined_details = {**stored_details, **current_details}
+    missing_details = get_missing_details(combined_details)
+    fallback_question = create_fallback_question(missing_details)
     
     common_mistakes = """
 💡 **Avoid these mistakes:**
@@ -335,7 +381,6 @@ Example: "Thanks! Need scholarship help?"
 User said: "{user_input}". Redirect to scholarship types.
 Example: "I focus on Maharashtra scholarships (government, private, NGO, college). Which type are you looking for?"
 {common_mistakes}
-
 """
     
     elif query_type == 'scholarship_query':
@@ -372,7 +417,7 @@ Scholarship type stored: **{stored_scholarship_type.capitalize()}**
 
 {common_mistakes}
 
-
+{fallback_question}
 """
         return f"""
 The user said: "{user_input}"  
@@ -390,6 +435,7 @@ The user said: "{user_input}"
 
 {common_mistakes}
 
+{fallback_question}
 """
     
     elif query_type == 'scholarship_personalized':
@@ -431,6 +477,7 @@ The user said: "{user_input}"
 
 {common_mistakes}
 
+{fallback_question}
 """
         return f"""
 The user said: "{user_input}"  
@@ -450,6 +497,7 @@ Here is what the chatbot knows based on this query:
 
 {common_mistakes}
 
+{fallback_question}
 """
     
     elif query_type == 'scholarship_types':
@@ -466,6 +514,7 @@ Your task is to:
 End with:
 {common_mistakes}
 
+{fallback_question}
 """
     
     elif query_type == 'scholarship_type_selection':
@@ -522,21 +571,35 @@ Example scholarships (customize based on type):
 - College: Mumbai University Merit Scholarship, Pune University Endowment Scholarship
 
 {common_mistakes}
+
+{fallback_question}
 """
     
     return f"""
 Unhandled intent: {query_type}. Redirect to scholarship help.
 Example: "I'm here for Maharashtra scholarships (government, private, NGO, college). Which type are you looking for?"
 {common_mistakes}
+
+{fallback_question}
 """
 
 def format_response(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'(#{1,6})\s*([^\n]+)', r'\1 \2', text)
     text = re.sub(r'^\s*[•·]\s*', '• ', text, flags=re.MULTILINE)
+    
+    # Ensure the fallback question is properly formatted
+    text = re.sub(r'(Would you like|Can you share|Are you|Do you|What is).*\?', 
+                 lambda m: "\n\n" + m.group(0), text)
+    
     lines = text.split('\n')
     cleaned_lines = [line.rstrip() for line in lines]
     text = '\n'.join(cleaned_lines)
+    
+    # Ensure the response ends with a question
+    if not any(punct in text[-1] for punct in ['?', '!']):
+        text += "\n\nWould you like more information about any of these scholarships?"
+    
     return text.strip()
 
 def validate_input(user_input):
@@ -633,6 +696,26 @@ def chat_with_gemini():
         full_prompt = create_scholarship_prompt(user_input, user_details)
         logger.debug(f"Generated prompt: {full_prompt[:200]}...")
 
+        # Add instructions to ensure chatbot knows answers to fallback questions
+        full_prompt += """
+IMPORTANT INSTRUCTIONS FOR THE CHATBOT:
+1. You MUST maintain the response structure: 
+   - First provide scholarship information based on known user details
+   - Then ask ONE relevant follow-up question at the end
+
+2. For follow-up questions:
+   - If user hasn't provided key details (caste, income, etc.), ask for those
+   - If all details are provided, ask if they want application process info
+   - Keep questions simple and one at a time
+
+3. You MUST know the answers to your own follow-up questions. For example:
+   - If asking about caste, be ready to explain different categories
+   - If asking about application process, be ready to guide them
+   - If asking about income, know the typical ranges
+
+4. Always end with a question to keep the conversation flowing.
+"""
+
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": full_prompt}]}],
@@ -698,7 +781,14 @@ def chat_with_gemini():
         logger.error(f"Server error: {str(e)}")
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
-# ... [rest of your code remains the same] ...
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': str(datetime.now()),
+        'database': 'connected' if db.engine else 'disconnected',
+        'gemini_api': 'configured' if GEMINI_API_KEY else 'not_configured'
+    })
 
 if __name__ == '__main__':
     logger.info("Starting Enhanced Maharashtra Scholarship Assistant with Gemini-powered entity extraction...")
@@ -707,19 +797,11 @@ if __name__ == '__main__':
     logger.info("\nAvailable endpoints:")
     logger.info("  POST /chat - Main chat endpoint for scholarship queries")
     logger.info("  GET  /health - Health check and status")
-    logger.info("  GET  /links - Get all scholarship website links")
-    logger.info("  GET  /mistakes - Get common scholarship application mistakes")
-    logger.info("  POST /test - Test endpoint with sample query")
     logger.info("\nKey Features:")
-    logger.info("  Gemini-powered intent detection and entity extraction")
-    logger.info("  Direct scholarship website links included")
-    logger.info("  Government portals (MahaDBT, NSP)")
-    logger.info("  Private scholarship platforms")
-    logger.info("  University-specific links")
-    logger.info("  Helpline numbers included")
-    logger.info("  Persistent scholarship type handling")
-    logger.info("  Null-safe scholarship type handling")
-    logger.info("  Intent-based data storage")
+    logger.info("  - Gemini-powered intent detection and entity extraction")
+    logger.info("  - Persistent user profile tracking")
+    logger.info("  - Smart fallback questions to gather more details")
+    logger.info("  - Structured responses with scholarship info first, questions last")
     
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not configured!")
